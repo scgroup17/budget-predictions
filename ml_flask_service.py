@@ -339,10 +339,9 @@ class Retrain(Resource):
         try:
             start_time = datetime.now()
             data = request.json
-            
-            supabase_url = data.get('supabase_url')
-            supabase_key = data.get('supabase_key')
-            triggered_by = data.get('triggered_by')
+            supabase_url = os.environ.get('SUPABASE_URL')
+            supabase_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+            triggered_by = data.get('triggered_by', 'manual')
             
             if not supabase_url or not supabase_key:
                 return {'error': 'Supabase credentials required'}, 400
