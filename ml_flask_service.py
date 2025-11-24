@@ -72,8 +72,8 @@ CURRENT_MODEL_VERSION = None
 # Input schema for prediction features
 features_model = api.model('PredictionFeatures', {
     'arv': fields.Float(required=True, description='After Repair Value ($)', example=450000),
-    'property_type': fields.String(required=False, description='Property type', example='SFR', 
-                                   enum=['SFR', 'Condo', 'Townhouse', 'Multifamily', 'Land', 'Warehouse', 'Office']),
+    'property_type': fields.String(required=False, description='Property type (Single Family = SFR)', example='SFR', 
+                                   enum=['SFR', 'Single Family', 'Condo', 'Townhouse', 'Multifamily', 'Land', 'Warehouse', 'Office']),
     'zip_code': fields.String(required=True, description='5-digit zip code', example='33178'),
     'project_year': fields.Integer(required=False, description='Project year', example=2024),
     'building_size': fields.Integer(required=False, description='Building size in sqft', example=2049),
@@ -250,6 +250,9 @@ class Predict(Resource):
             if 'Property Type_encoded' in required_features:
                 try:
                     prop_type = features.get('property_type', 'SFR')
+                    # Normalize property type: "Single Family" -> "SFR"
+                    if prop_type == 'Single Family':
+                        prop_type = 'SFR'
                     encoded_features['Property Type_encoded'] = LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
                 except:
                     encoded_features['Property Type_encoded'] = 0
@@ -366,17 +369,57 @@ class Retrain(Resource):
             enrichment_data = {}
             attom_calls = 0
             
+            logger.info("Checking property enrichment...")
+            
             for budget in budgets:
                 addr = budget.get('address')
                 zip_code = budget.get('zip_code')
                 if not addr or not zip_code:
                     continue
                     
+                # Check if already enriched in database
                 enrich = supabase.table('property_enrichment').select('*').eq('address', addr).eq('zip_code', zip_code).execute()
+                
                 if enrich.data:
+                    # Use cached enrichment
                     enrichment_data[f"{addr}_{zip_code}"] = enrich.data[0]
+                    logger.debug(f"Using cached enrichment for {addr}")
                 else:
-                    attom_calls += 1
+                    # Call Supabase edge function to enrich property
+                    logger.info(f"Enriching property: {addr}, {zip_code}")
+                    try:
+                        enrich_response = requests.post(
+                            f"{supabase_url}/functions/v1/enrich-property",
+                            headers={
+                                'Authorization': f'Bearer {supabase_key}',
+                                'Content-Type': 'application/json'
+                            },
+                            json={
+                                'address': addr,
+                                'zip_code': zip_code
+                            },
+                            timeout=30
+                        )
+                        
+                        if enrich_response.ok:
+                            enrich_result = enrich_response.json()
+                            if enrich_result.get('success'):
+                                enrichment_data[f"{addr}_{zip_code}"] = enrich_result.get('enrichment', {})
+                                attom_calls += 1
+                                logger.info(f"✓ Enriched {addr}")
+                            else:
+                                logger.warning(f"Enrichment failed for {addr}: {enrich_result.get('error')}")
+                        else:
+                            logger.warning(f"Enrichment API returned {enrich_response.status_code} for {addr}")
+                    
+                    except requests.exceptions.Timeout:
+                        logger.warning(f"Enrichment timeout for {addr}")
+                    except Exception as e:
+                        logger.warning(f"Failed to enrich {addr}: {str(e)}")
+                    
+                    # Add small delay to respect rate limits (200/min = ~0.3s per request)
+                    import time
+                    time.sleep(0.4)
             
             # 3. Prepare dataset
             training_data = []
