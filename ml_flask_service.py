@@ -137,7 +137,7 @@ retrain_output = api.model('RetrainOutput', {
 # ============================================================================
 
 def load_models_from_storage():
-    """Load models from Supabase Storage"""
+    """Load models from Supabase Storage - always loads latest version"""
     global MODELS, LABEL_ENCODERS, MODEL_PERFORMANCE, CURRENT_MODEL_VERSION
     
     try:
@@ -150,20 +150,40 @@ def load_models_from_storage():
         
         supabase: Client = create_client(supabase_url, supabase_key)
         
-        version = 'v1'
-        CURRENT_MODEL_VERSION = version
+        # Find latest version by checking what exists in storage
+        logger.info("Finding latest model version...")
+        latest_version = None
         
-        logger.info(f"Loading models version {version}...")
+        try:
+            # List folders in models/
+            folders = supabase.storage.from_('ml-models').list('models')
+            versions = [f['name'] for f in folders if f['name'].startswith('v')]
+            
+            if versions:
+                # Sort versions (v1, v2, v3, etc.)
+                versions.sort(key=lambda x: int(x[1:]))
+                latest_version = versions[-1]
+                logger.info(f"Found versions: {versions}, using latest: {latest_version}")
+            else:
+                latest_version = 'v1'
+                logger.info("No versions found, defaulting to v1")
+        except:
+            latest_version = 'v1'
+            logger.warning("Could not list versions, defaulting to v1")
         
-        models_file = supabase.storage.from_('ml-models').download(f'models/{version}/budget_models_enhanced.pkl')
-        encoders_file = supabase.storage.from_('ml-models').download(f'models/{version}/label_encoders_enhanced.pkl')
-        perf_file = supabase.storage.from_('ml-models').download(f'models/{version}/model_performance_enhanced.json')
+        CURRENT_MODEL_VERSION = latest_version
+        
+        logger.info(f"Loading models version {latest_version}...")
+        
+        models_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/budget_models_enhanced.pkl')
+        encoders_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/label_encoders_enhanced.pkl')
+        perf_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/model_performance_enhanced.json')
         
         MODELS = pickle.loads(models_file)
         LABEL_ENCODERS = pickle.loads(encoders_file)
         MODEL_PERFORMANCE = json.loads(perf_file.decode('utf-8'))
         
-        logger.info(f"✓ Loaded {len(MODELS)} category models")
+        logger.info(f"✓ Loaded {len(MODELS)} category models from {latest_version}")
         return True
         
     except Exception as e:
@@ -818,12 +838,51 @@ class Retrain(Resource):
                 new_performance[category] = {'best_model_name': best_name, **best_metrics}
                 categories_trained += 1
             
-            # 5. Save to storage
+            # 5. Save to storage - MERGE with existing on-the-fly models
             new_version = f"v{int(CURRENT_MODEL_VERSION[1:]) + 1}" if CURRENT_MODEL_VERSION else "v2"
             
-            supabase.storage.from_('ml-models').upload(f'models/{new_version}/budget_models_enhanced.pkl', pickle.dumps(new_models))
-            supabase.storage.from_('ml-models').upload(f'models/{new_version}/label_encoders_enhanced.pkl', pickle.dumps({'Property Type': le_prop, 'Property Zip': le_zip}))
-            supabase.storage.from_('ml-models').upload(f'models/{new_version}/model_performance_enhanced.json', json.dumps(new_performance).encode())
+            # Cargar modelos existentes de la versión actual para preservar on-the-fly
+            existing_models = {}
+            existing_performance = {}
+            
+            try:
+                logger.info(f"Loading existing models from {CURRENT_MODEL_VERSION} to preserve on-the-fly trained models...")
+                existing_file = supabase.storage.from_('ml-models').download(f'models/{CURRENT_MODEL_VERSION}/budget_models_enhanced.pkl')
+                existing_models = pickle.loads(existing_file)
+                
+                existing_perf_file = supabase.storage.from_('ml-models').download(f'models/{CURRENT_MODEL_VERSION}/model_performance_enhanced.json')
+                existing_performance = json.loads(existing_perf_file.decode('utf-8'))
+                
+                logger.info(f"Found {len(existing_models)} existing models in {CURRENT_MODEL_VERSION}")
+            except Exception as e:
+                logger.warning(f"Could not load existing models (will create fresh): {e}")
+            
+            # Merge: batch trained models OVERWRITE, on-the-fly models PRESERVE
+            # Start with existing (includes on-the-fly)
+            merged_models = existing_models.copy()
+            merged_performance = existing_performance.copy()
+            
+            # Update with newly trained batch models (overwrites if exists)
+            merged_models.update(new_models)
+            merged_performance.update(new_performance)
+            
+            on_the_fly_count = len(existing_models) - len(new_models)
+            logger.info(f"Saving {len(merged_models)} total models to {new_version}:")
+            logger.info(f"  - {len(new_models)} batch trained (new/updated)")
+            logger.info(f"  - {max(0, on_the_fly_count)} on-the-fly preserved")
+            
+            supabase.storage.from_('ml-models').upload(
+                f'models/{new_version}/budget_models_enhanced.pkl',
+                pickle.dumps(merged_models)
+            )
+            supabase.storage.from_('ml-models').upload(
+                f'models/{new_version}/label_encoders_enhanced.pkl',
+                pickle.dumps({'Property Type': le_prop, 'Property Zip': le_zip})
+            )
+            supabase.storage.from_('ml-models').upload(
+                f'models/{new_version}/model_performance_enhanced.json',
+                json.dumps(merged_performance).encode()
+            )
             
             # 6. Log
             exec_time = int((datetime.now() - start_time).total_seconds())
