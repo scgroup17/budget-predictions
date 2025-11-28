@@ -398,6 +398,74 @@ def train_category_model(category):
         
         logger.info(f"✓ Trained {best_name} for '{category}': R²={best_metrics['r2']:.3f}, RMSE=${best_metrics['rmse']:.0f}")
         
+        # === IGUAL QUE RETRAIN: Guardar en Storage y DB ===
+        try:
+            # 1. Actualizar archivos en Storage (IGUAL que Retrain líneas 756-758)
+            version = CURRENT_MODEL_VERSION or 'v1'
+            
+            # Cargar modelos existentes
+            try:
+                existing_models_file = supabase.storage.from_('ml-models').download(f'models/{version}/budget_models_enhanced.pkl')
+                existing_models = pickle.loads(existing_models_file)
+            except:
+                existing_models = {}
+            
+            try:
+                existing_encoders_file = supabase.storage.from_('ml-models').download(f'models/{version}/label_encoders_enhanced.pkl')
+                existing_encoders = pickle.loads(existing_encoders_file)
+            except:
+                existing_encoders = {}
+            
+            try:
+                existing_perf_file = supabase.storage.from_('ml-models').download(f'models/{version}/model_performance_enhanced.json')
+                existing_performance = json.loads(existing_perf_file.decode('utf-8'))
+            except:
+                existing_performance = {}
+            
+            # Agregar nuevo modelo a los existentes
+            existing_models[category] = MODELS[category]
+            existing_performance[category] = {'best_model_name': best_name, **best_metrics}
+            existing_encoders['Property Type'] = le_prop
+            existing_encoders['Property Zip'] = le_zip
+            
+            # Guardar de vuelta (SOBRESCRIBE con upsert)
+            supabase.storage.from_('ml-models').upload(
+                f'models/{version}/budget_models_enhanced.pkl',
+                pickle.dumps(existing_models),
+                file_options={"upsert": "true"}
+            )
+            supabase.storage.from_('ml-models').upload(
+                f'models/{version}/label_encoders_enhanced.pkl',
+                pickle.dumps(existing_encoders),
+                file_options={"upsert": "true"}
+            )
+            supabase.storage.from_('ml-models').upload(
+                f'models/{version}/model_performance_enhanced.json',
+                json.dumps(existing_performance).encode(),
+                file_options={"upsert": "true"}
+            )
+            
+            logger.info(f"✓ Updated Storage with new model for '{category}'")
+            
+            # 2. Guardar log en DB (IGUAL que Retrain línea 762-771)
+            supabase.table('model_retraining_logs').insert({
+                'triggered_by': 'on_the_fly_training',
+                'total_categories': 1,
+                'categories_trained': 1,
+                'total_samples': len(df),
+                'categories_performance': {category: {'best_model_name': best_name, **best_metrics}},
+                'execution_time_seconds': 0,
+                'attom_api_calls': 0,
+                'new_model_version': version,
+                'notes': f'On-the-fly training for: {category}'
+            }).execute()
+            
+            logger.info(f"✓ Logged training to database")
+            
+        except Exception as storage_error:
+            logger.warning(f"Failed to save to storage/db (non-critical): {storage_error}")
+            # No fallar si esto falla, el modelo ya está en memoria
+        
         return True
         
     except Exception as e:
