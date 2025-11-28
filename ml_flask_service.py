@@ -14,6 +14,7 @@ import json
 import os
 from datetime import datetime
 import logging
+import requests
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
@@ -181,6 +182,154 @@ def get_model_tier(performance):
     else:
         return 'C'
 
+def train_category_model(category):
+    """
+    Train a model for a specific category on-the-fly.
+    Returns True if successful, False if insufficient data.
+    """
+    global MODELS, LABEL_ENCODERS, MODEL_PERFORMANCE
+    
+    try:
+        from sklearn.linear_model import Ridge
+        from sklearn.ensemble import RandomForestRegressor, HistGradientBoostingRegressor
+        from sklearn.model_selection import train_test_split
+        from sklearn.preprocessing import LabelEncoder
+        from sklearn.impute import SimpleImputer
+        from sklearn.pipeline import Pipeline
+        from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_percentage_error
+        import requests
+        
+        supabase_url = os.environ.get('SUPABASE_URL')
+        supabase_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
+        
+        if not supabase_url or not supabase_key:
+            logger.error("Missing Supabase credentials for training")
+            return False
+        
+        supabase: Client = create_client(supabase_url, supabase_key)
+        
+        # Fetch all data from Supabase
+        logger.info(f"Fetching training data for category: {category}")
+        budgets = supabase.table('budgets').select('*').execute().data
+        items = supabase.table('budget_items').select('*').execute().data
+        
+        # Filter items for this specific category
+        category_items = [item for item in items 
+                         if (item.get('user_category') or item.get('ai_category')) == category]
+        
+        if len(category_items) < 50:
+            logger.warning(f"Only {len(category_items)} samples for '{category}' - need at least 50")
+            return False
+        
+        logger.info(f"Found {len(category_items)} samples for '{category}'")
+        
+        # Get enrichment data (use cached if available)
+        enrichment_data = {}
+        for budget in budgets:
+            addr = budget.get('address')
+            zip_code = budget.get('zip_code')
+            if addr and zip_code:
+                enrich = supabase.table('property_enrichment').select('*').eq('address', addr).eq('zip_code', zip_code).execute()
+                if enrich.data:
+                    enrichment_data[f"{addr}_{zip_code}"] = enrich.data[0]
+        
+        # Prepare training data
+        training_data = []
+        for item in category_items:
+            budget = next((b for b in budgets if b['id'] == item['budget_id']), None)
+            if not budget or not item.get('amount') or item['amount'] <= 0:
+                continue
+            
+            enrich = enrichment_data.get(f"{budget.get('address')}_{budget.get('zip_code')}", {})
+            
+            training_data.append({
+                'amount': item['amount'],
+                'arv': budget.get('arv', 0),
+                'property_type': budget.get('property_type', 'SFR'),
+                'zip_code': budget.get('zip_code', '00000'),
+                'project_year': budget.get('project_year', 2024),
+                'building_size': enrich.get('building_size'),
+                'bedrooms': enrich.get('bedrooms'),
+                'bathrooms': enrich.get('bathrooms'),
+                'year_built': enrich.get('year_built')
+            })
+        
+        if len(training_data) < 50:
+            logger.warning(f"After filtering, only {len(training_data)} valid samples")
+            return False
+        
+        df = pd.DataFrame(training_data)
+        
+        # Encode categorical features
+        le_prop = LabelEncoder()
+        le_zip = LabelEncoder()
+        
+        df['Property Type_encoded'] = le_prop.fit_transform(df['property_type'].fillna('SFR').astype(str))
+        df['Property Zip_encoded'] = le_zip.fit_transform(df['zip_code'].fillna('00000').astype(str))
+        df['years_since_2020'] = df['project_year'] - 2020
+        
+        # Prepare features
+        X = df[['arv', 'Property Type_encoded', 'Property Zip_encoded', 'years_since_2020']].copy()
+        X.columns = ['(ARV) After Repair Value', 'Property Type_encoded', 'Property Zip_encoded', 'years_since_2020']
+        y = df['amount']
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Train 3 models and select best
+        best_score = -np.inf
+        best_model = None
+        best_name = None
+        best_metrics = {}
+        
+        for name, model in [
+            ('Ridge Regression', Pipeline([('imp', SimpleImputer(strategy='median')), ('reg', Ridge())])),
+            ('Random Forest', Pipeline([('imp', SimpleImputer(strategy='median')), ('reg', RandomForestRegressor(n_estimators=100, max_depth=15, random_state=42))])),
+            ('Gradient Boosting', HistGradientBoostingRegressor(max_iter=100, max_depth=10, random_state=42))
+        ]:
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            r2 = r2_score(y_test, y_pred)
+            
+            if r2 > best_score:
+                best_score = r2
+                best_model = model
+                best_name = name
+                best_metrics = {
+                    'r2': r2,
+                    'rmse': np.sqrt(mean_squared_error(y_test, y_pred)),
+                    'mape': mean_absolute_percentage_error(y_test, y_pred) * 100
+                }
+        
+        # Save to global MODELS
+        MODELS[category] = {
+            'best_model': best_model,
+            'best_model_name': best_name,
+            'feature_cols': list(X.columns),
+            'training_stats': {
+                'n_samples': len(df),
+                'trained_at': datetime.now().isoformat()
+            }
+        }
+        
+        MODEL_PERFORMANCE[category] = best_metrics
+        
+        # Update label encoders
+        if 'Property Type' not in LABEL_ENCODERS:
+            LABEL_ENCODERS['Property Type'] = le_prop
+        if 'Property Zip' not in LABEL_ENCODERS:
+            LABEL_ENCODERS['Property Zip'] = le_zip
+        
+        logger.info(f"✓ Trained {best_name} for '{category}': R²={best_metrics['r2']:.3f}, RMSE=${best_metrics['rmse']:.0f}")
+        
+        return True
+        
+    except Exception as e:
+        logger.error(f"Training failed for '{category}': {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -233,11 +382,31 @@ class Predict(Resource):
             if not category:
                 return {'error': 'Category is required'}, 400
             
+            # If category not found, try to train it on-the-fly
             if category not in MODELS:
-                return {
-                    'error': f'No model available for category: {category}',
-                    'available_categories': sorted(list(MODELS.keys()))[:20]
-                }, 404
+                logger.warning(f"Category '{category}' not found. Attempting on-the-fly training...")
+                
+                try:
+                    # Train model for this specific category
+                    trained = train_category_model(category)
+                    
+                    if trained:
+                        logger.info(f"✓ Successfully trained model for '{category}'")
+                        # Continue with prediction using newly trained model
+                    else:
+                        logger.error(f"Failed to train model for '{category}' - insufficient data")
+                        return {
+                            'error': f'No model available for category: {category}',
+                            'reason': 'Insufficient training data (need at least 50 samples)',
+                            'available_categories': sorted(list(MODELS.keys()))[:20]
+                        }, 404
+                        
+                except Exception as e:
+                    logger.error(f"On-the-fly training failed: {str(e)}")
+                    return {
+                        'error': f'Failed to train model for category: {category}',
+                        'details': str(e)
+                    }, 500
             
             # Get model info
             model_info = MODELS[category]
