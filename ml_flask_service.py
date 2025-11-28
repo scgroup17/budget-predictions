@@ -182,6 +182,74 @@ def get_model_tier(performance):
     else:
         return 'C'
 
+def train_simple_average_model(category, category_items, budgets):
+    """
+    Create a simple average-based model when there are very few samples (<10).
+    Uses average cost per ARV ratio from available samples.
+    """
+    global MODELS, MODEL_PERFORMANCE
+    
+    try:
+        logger.info(f"Creating simple average model for '{category}' with {len(category_items)} samples")
+        
+        # Calculate average amount and ARV ratio
+        valid_samples = []
+        for item in category_items:
+            budget = next((b for b in budgets if b['id'] == item['budget_id']), None)
+            if budget and item.get('amount') and item['amount'] > 0 and budget.get('arv'):
+                valid_samples.append({
+                    'amount': item['amount'],
+                    'arv': budget['arv'],
+                    'ratio': item['amount'] / budget['arv']
+                })
+        
+        if len(valid_samples) == 0:
+            logger.error(f"No valid samples for '{category}'")
+            return False
+        
+        # Calculate statistics
+        avg_amount = np.mean([s['amount'] for s in valid_samples])
+        avg_ratio = np.mean([s['ratio'] for s in valid_samples])
+        std_ratio = np.std([s['ratio'] for s in valid_samples]) if len(valid_samples) > 1 else avg_ratio * 0.5
+        
+        # Create a simple predictor class
+        class SimpleAveragePredictor:
+            def __init__(self, avg_ratio, avg_amount):
+                self.avg_ratio = avg_ratio
+                self.avg_amount = avg_amount
+            
+            def predict(self, X):
+                # X is a DataFrame with '(ARV) After Repair Value' column
+                arvs = X['(ARV) After Repair Value'].values
+                # Use ratio if ARV is available, otherwise use average
+                predictions = np.where(arvs > 0, arvs * self.avg_ratio, self.avg_amount)
+                return predictions
+        
+        # Save simple model
+        MODELS[category] = {
+            'best_model': SimpleAveragePredictor(avg_ratio, avg_amount),
+            'best_model_name': 'Simple Average',
+            'feature_cols': ['(ARV) After Repair Value', 'Property Type_encoded', 'Property Zip_encoded', 'years_since_2020'],
+            'training_stats': {
+                'n_samples': len(valid_samples),
+                'trained_at': datetime.now().isoformat(),
+                'model_type': 'simple_average'
+            }
+        }
+        
+        MODEL_PERFORMANCE[category] = {
+            'r2': 0.0,  # Simple model doesn't have R²
+            'rmse': std_ratio * avg_amount,
+            'mape': (std_ratio / avg_ratio * 100) if avg_ratio > 0 else 100
+        }
+        
+        logger.info(f"✓ Created simple model for '{category}': avg=${avg_amount:.0f}, ratio={avg_ratio:.4f}")
+        return True
+        
+    except Exception as e:
+        logger.error(f"Failed to create simple model for '{category}': {str(e)}")
+        return False
+
 def train_category_model(category):
     """
     Train a model for a specific category on-the-fly.
@@ -217,11 +285,16 @@ def train_category_model(category):
         category_items = [item for item in items 
                          if (item.get('user_category') or item.get('ai_category')) == category]
         
-        if len(category_items) < 50:
-            logger.warning(f"Only {len(category_items)} samples for '{category}' - need at least 50")
-            return False
-        
         logger.info(f"Found {len(category_items)} samples for '{category}'")
+        
+        # If very few samples, use simple average model instead of ML
+        if len(category_items) < 10:
+            logger.info(f"Only {len(category_items)} samples - using simple average model")
+            return train_simple_average_model(category, category_items, budgets)
+        
+        # If 10-50 samples, warn but continue with ML training
+        if len(category_items) < 50:
+            logger.warning(f"Only {len(category_items)} samples for '{category}' - model may be less accurate")
         
         # Get enrichment data (use cached if available)
         enrichment_data = {}
@@ -254,9 +327,12 @@ def train_category_model(category):
                 'year_built': enrich.get('year_built')
             })
         
-        if len(training_data) < 50:
-            logger.warning(f"After filtering, only {len(training_data)} valid samples")
+        # No minimum threshold - train with whatever data we have
+        if len(training_data) < 5:
+            logger.error(f"After filtering, only {len(training_data)} valid samples - too few to train")
             return False
+        
+        logger.info(f"Training with {len(training_data)} valid samples")
         
         df = pd.DataFrame(training_data)
         
