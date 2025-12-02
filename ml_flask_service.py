@@ -93,7 +93,9 @@ predict_output = api.model('PredictOutput', {
     'model_r2': fields.Float(description='R² score (0-1)', example=0.5242),
     'model_mape': fields.Float(description='Mean Absolute Percentage Error (%)', example=76.24),
     'model_rmse': fields.Float(description='Root Mean Square Error ($)', example=5621.03),
-    'model_version': fields.String(description='Model version', example='v1')
+    'model_version': fields.String(description='Model version', example='v1'),
+    'warning': fields.String(required=False, description='Warning message if using fallback model'),
+    'is_fallback': fields.Boolean(required=False, description='True if using generic fallback instead of trained model')
 })
 
 # Error response schema
@@ -249,11 +251,34 @@ class Predict(Resource):
             if not category:
                 return {'error': 'Category is required'}, 400
             
+            # Si no encuentra la categoría, usar modelo de fallback genérico
+            use_fallback = False
             if category not in MODELS:
+                logger.warning(f"Category '{category}' not found. Using generic fallback model.")
+                use_fallback = True
+                
+                # TODO v2: Aquí llamar a train_category_model(category) para aprender on-the-fly
+                # Por ahora, usar estimación genérica basada en ARV
+                
+                # Modelo de fallback: 3-5% del ARV como estimación genérica
+                arv = features.get('arv', 0)
+                if arv <= 0:
+                    arv = 250000  # ARV promedio por defecto
+                
+                # Estimación conservadora: 4% del ARV
+                fallback_prediction = arv * 0.04
+                
                 return {
-                    'error': f'No model available for category: {category}',
-                    'available_categories': sorted(list(MODELS.keys()))[:20]
-                }, 404
+                    'predicted_amount': round(fallback_prediction, 2),
+                    'model_used': 'Generic Fallback (4% ARV)',
+                    'model_tier': 'C',
+                    'model_r2': 0.0,
+                    'model_mape': 100.0,
+                    'model_rmse': fallback_prediction * 0.5,  # 50% uncertainty
+                    'model_version': 'fallback',
+                    'warning': f'No trained model for category "{category}". Using generic estimate.',
+                    'is_fallback': True
+                }
             
             # Get model info
             model_info = MODELS[category]
