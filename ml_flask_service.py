@@ -66,10 +66,9 @@ CURRENT_MODEL_VERSION = None
 # ============================================================================
 
 # Input schema for prediction features
-features_model = api.model('PredictionFeatures', {
+features_model = api.model('Features', {
     'arv': fields.Float(required=True, description='After Repair Value ($)', example=450000),
-    'property_type': fields.String(required=False, description='Property type', example='SFR', 
-                                   enum=['SFR', 'Condo', 'Townhouse', 'Multifamily', 'Land', 'Warehouse', 'Office']),
+    'property_type': fields.String(required=True, description='Property type. Accepts: SFR, "Single Family", Condo, Townhouse, "Town House", Multifamily, "Multi Family"', example='Single Family'),
     'zip_code': fields.String(required=True, description='5-digit zip code', example='33178'),
     'project_year': fields.Integer(required=False, description='Project year', example=2024),
     'building_size': fields.Integer(required=False, description='Building size in sqft', example=2049),
@@ -199,6 +198,27 @@ def get_model_tier(performance):
     else:
         return 'C'
 
+def normalize_property_type(prop_type):
+    """Normalize property type variations to standard format"""
+    if not prop_type:
+        return 'SFR'
+    
+    property_type_mapping = {
+        'Single Family': 'SFR',
+        'SingleFamily': 'SFR',
+        'Single-Family': 'SFR',
+        'single family': 'SFR',
+        'Multi Family': 'Multifamily',
+        'MultiFamily': 'Multifamily',
+        'Multi-Family': 'Multifamily',
+        'multi family': 'Multifamily',
+        'Town House': 'Townhouse',
+        'TownHouse': 'Townhouse',
+        'town house': 'Townhouse'
+    }
+    
+    return property_type_mapping.get(prop_type, prop_type)
+
 # ============================================================================
 # API ENDPOINTS
 # ============================================================================
@@ -290,9 +310,10 @@ class Predict(Resource):
             
             if 'Property Type_encoded' in required_features:
                 try:
-                    prop_type = features.get('property_type', 'SFR')
+                    prop_type = normalize_property_type(features.get('property_type', 'SFR'))
                     encoded_features['Property Type_encoded'] = LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
-                except:
+                except Exception as e:
+                    logger.warning(f"Failed to encode property_type '{features.get('property_type')}': {e}. Using default.")
                     encoded_features['Property Type_encoded'] = 0
             
             if 'Property Zip_encoded' in required_features:
