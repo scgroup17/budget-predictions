@@ -1,8 +1,8 @@
 import pandas as pd
 import numpy as np
 import threading
-from app.config import MODELS, LABEL_ENCODERS, MODEL_PERFORMANCE, CURRENT_MODEL_VERSION, logger, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 import app.config as config
+from app.config import logger, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 from app.models.model_loader import get_model_tier
 from supabase import create_client, Client
 from sklearn.linear_model import Ridge
@@ -43,7 +43,7 @@ def encode_features(features, required_features):
     if 'Property Type_encoded' in required_features:
         try:
             prop_type = normalize_property_type(features.get('property_type', 'SFR'))
-            encoded_features['Property Type_encoded'] = LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
+            encoded_features['Property Type_encoded'] = config.LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
         except Exception as e:
             logger.warning(f"Failed to encode property_type '{features.get('property_type')}': {e}. Using default.")
             encoded_features['Property Type_encoded'] = 0
@@ -51,7 +51,7 @@ def encode_features(features, required_features):
     if 'Property Zip_encoded' in required_features:
         try:
             zip_code = str(features.get('zip_code', ''))[:5]
-            encoded_features['Property Zip_encoded'] = LABEL_ENCODERS['Property Zip'].transform([zip_code])[0]
+            encoded_features['Property Zip_encoded'] = config.LABEL_ENCODERS['Property Zip'].transform([zip_code])[0]
         except:
             encoded_features['Property Zip_encoded'] = 0
     
@@ -257,7 +257,7 @@ def predict_budget_item(category, features):
     using_general = False
     perf_key = category
     
-    if category not in MODELS:
+    if category not in config.MODELS:
         samples_count = count_category_samples(category)
         logger.info(f"Category '{category}' not found. Samples in DB: {samples_count}")
         
@@ -273,7 +273,7 @@ def predict_budget_item(category, features):
         if not general_model:
             return None, {
                 'error': f'No model available for category: {category}',
-                'available_categories': sorted(list(MODELS.keys()))[:20]
+                'available_categories': sorted(list(config.MODELS.keys()))[:20]
             }
         
         model_info = general_model
@@ -281,7 +281,7 @@ def predict_budget_item(category, features):
         perf_key = 'GENERAL'
         logger.info(f"Using GENERAL model for '{category}'")
     else:
-        model_info = MODELS[category]
+        model_info = config.MODELS[category]
     
     model = model_info['best_model']
     required_features = model_info['feature_cols']
@@ -294,7 +294,7 @@ def predict_budget_item(category, features):
     
     predicted_amount = float(model.predict(features_df)[0])
     
-    perf = MODEL_PERFORMANCE.get(perf_key, {})
+    perf = config.MODEL_PERFORMANCE.get(perf_key, {})
     
     return {
         'predicted_amount': round(predicted_amount, 2),
@@ -303,5 +303,5 @@ def predict_budget_item(category, features):
         'model_r2': round(perf.get('r2', 0), 4),
         'model_mape': round(perf.get('mape', 0), 2),
         'model_rmse': round(perf.get('rmse', 0), 2),
-        'model_version': CURRENT_MODEL_VERSION
+        'model_version': config.CURRENT_MODEL_VERSION
     }, None

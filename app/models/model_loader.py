@@ -15,11 +15,14 @@ def load_models_from_storage():
         
         try:
             files = supabase.storage.from_('ml-models').list('models')
+            logger.info(f"Files found in storage: {[f['name'] for f in files]}")
             versions = [f['name'] for f in files if f['name'].startswith('v')]
+            logger.info(f"Versions detected: {versions}")
             if versions:
                 versions_sorted = sorted(versions, key=lambda x: int(x[1:]))
+                logger.info(f"Versions sorted: {versions_sorted}")
                 version = versions_sorted[-1]
-                logger.info(f"Detected latest version: {version}")
+                logger.info(f"Selected latest version: {version}")
             else:
                 logger.warning("No versions found in storage, defaulting to v1")
                 version = 'v1'

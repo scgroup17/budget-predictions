@@ -1,7 +1,8 @@
 from flask import request
 from flask_restx import Resource, Namespace
 from datetime import datetime
-from app.config import MODELS, MODEL_PERFORMANCE, CURRENT_MODEL_VERSION, logger
+import app.config as config
+from app.config import logger
 from app.models.model_loader import get_model_tier
 from app.services.prediction_service import predict_budget_item
 from app.services.retraining_service import retrain_models
@@ -25,8 +26,8 @@ def register_routes(schemas):
             """Check service health and model status"""
             return {
                 'status': 'healthy',
-                'models_loaded': len(MODELS),
-                'model_version': CURRENT_MODEL_VERSION,
+                'models_loaded': len(config.MODELS),
+                'model_version': config.CURRENT_MODEL_VERSION,
                 'timestamp': datetime.now().isoformat()
             }
     

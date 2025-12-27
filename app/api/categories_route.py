@@ -1,5 +1,5 @@
 from flask_restx import Resource
-from app.config import MODELS, MODEL_PERFORMANCE
+import app.config as config
 from app.models.model_loader import get_model_tier
 
 def register_categories_route(api):
@@ -11,8 +11,8 @@ def register_categories_route(api):
         def get(self):
             """List all available budget categories with model info"""
             categories = []
-            for cat, info in MODELS.items():
-                perf = MODEL_PERFORMANCE.get(cat, {})
+            for cat, info in config.MODELS.items():
+                perf = config.MODEL_PERFORMANCE.get(cat, {})
                 categories.append({
                     'category': cat,
                     'model': info['best_model_name'],
