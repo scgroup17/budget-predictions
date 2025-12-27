@@ -51,6 +51,9 @@ def create_app():
     
     register_categories_route(api)
     
+    if not load_models_from_storage():
+        logger.warning("Models not loaded - will retry on first request")
+    
     return app
 
 def main():
