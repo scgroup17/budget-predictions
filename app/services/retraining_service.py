@@ -236,16 +236,13 @@ def retrain_models(supabase_url, supabase_key, triggered_by):
     api_url = os.getenv('TRAINING_API_URL', 'https://rbi-prod-25ffebfb684a.herokuapp.com')
     api_key = os.getenv('TRAINING_API_KEY')
     
-    if api_key:
-        logger.info("Using external API for training data")
-        budgets = fetch_training_data_from_api(api_url, api_key)
-        enrichment_data, attom_calls = process_enrichment_from_api(budgets)
-        df = prepare_training_dataset(budgets, enrichment_data)
-    else:
-        logger.info("Using Supabase for training data (legacy)")
-        budgets, items = fetch_training_data(supabase)
-        enrichment_data, attom_calls = check_enrichment(supabase, budgets)
-        df = prepare_training_dataset(budgets, enrichment_data)
+    if not api_key:
+        raise ValueError("TRAINING_API_KEY environment variable is required for retraining")
+    
+    logger.info("Fetching training data from external API")
+    budgets = fetch_training_data_from_api(api_url, api_key)
+    enrichment_data, attom_calls = process_enrichment_from_api(budgets)
+    df = prepare_training_dataset(budgets, enrichment_data)
     df, le_prop, le_zip = encode_training_features(df)
     new_models, new_performance, categories_trained = train_category_models(df)
     
