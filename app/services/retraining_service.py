@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 import pickle
 import json
+import requests
 from datetime import datetime
 from supabase import create_client, Client
 from sklearn.linear_model import Ridge
@@ -13,15 +14,72 @@ from sklearn.pipeline import Pipeline
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, mean_absolute_percentage_error
 from app.config import logger, CURRENT_MODEL_VERSION
 
+def fetch_training_data_from_api(api_url, api_key):
+    """Fetch training data from external API with pagination"""
+    logger.info("Fetching training data from external API...")
+    
+    all_budgets = []
+    page = 1
+    
+    while True:
+        try:
+            response = requests.get(
+                f"{api_url}/api/public/v1/budget-items-enriched",
+                params={'page': page, 'limit': 100},
+                headers={'X-API-KEY': api_key},
+                timeout=60
+            )
+            response.raise_for_status()
+            data = response.json()
+            
+            budgets = data.get('budgets', [])
+            all_budgets.extend(budgets)
+            
+            total_items = sum(len(b.get('items', [])) for b in budgets)
+            logger.info(f"Fetched page {page}: {len(budgets)} budgets, {total_items} items")
+            
+            if not data.get('pagination', {}).get('has_next', False):
+                break
+                
+            page += 1
+            
+        except Exception as e:
+            logger.error(f"Error fetching page {page}: {e}")
+            if page == 1:
+                raise
+            break
+    
+    total_items = sum(len(b.get('items', [])) for b in all_budgets)
+    logger.info(f"Total fetched: {len(all_budgets)} budgets, {total_items} items")
+    return all_budgets
+
 def fetch_training_data(supabase):
-    """Fetch budgets and items from Supabase"""
+    """Fetch budgets and items from Supabase (legacy method)"""
     logger.info("Fetching training data...")
     budgets = supabase.table('budgets').select('*').execute().data
     items = supabase.table('budget_items').select('*').execute().data
     return budgets, items
 
+def process_enrichment_from_api(budgets):
+    """Process enrichment data from nested budget structure"""
+    enrichment_data = {}
+    
+    for budget in budgets:
+        budget_id = budget.get('id')
+        property_data = budget.get('property', {})
+        
+        if budget_id and property_data:
+            enrichment_data[str(budget_id)] = {
+                'building_size': property_data.get('building_size'),
+                'bedrooms': property_data.get('bedrooms'),
+                'bathrooms': property_data.get('bathrooms'),
+                'year_built': property_data.get('year_built')
+            }
+    
+    return enrichment_data, 0
+
 def check_enrichment(supabase, budgets):
-    """Check property enrichment data"""
+    """Check property enrichment data (legacy method)"""
     enrichment_data = {}
     attom_calls = 0
     
@@ -39,28 +97,31 @@ def check_enrichment(supabase, budgets):
     
     return enrichment_data, attom_calls
 
-def prepare_training_dataset(budgets, items, enrichment_data):
-    """Prepare training dataset from raw data"""
+def prepare_training_dataset(budgets, enrichment_data=None):
+    """Prepare training dataset from nested budget structure"""
     training_data = []
-    for item in items:
-        budget = next((b for b in budgets if b['id'] == item['budget_id']), None)
-        if not budget:
-            continue
+    
+    for budget in budgets:
+        budget_id = budget.get('id')
+        loan = budget.get('loan', {})
+        property_data = budget.get('property', {})
+        items = budget.get('items', [])
         
-        enrich = enrichment_data.get(f"{budget.get('address')}_{budget.get('zip_code')}", {})
+        enrich = enrichment_data.get(str(budget_id), {}) if enrichment_data else {}
         
-        training_data.append({
-            'category': item.get('user_category') or item.get('ai_category'),
-            'amount': item.get('amount'),
-            'arv': budget.get('arv'),
-            'property_type': budget.get('property_type'),
-            'zip_code': budget.get('zip_code'),
-            'project_year': budget.get('project_year', 2024),
-            'building_size': enrich.get('building_size'),
-            'bedrooms': enrich.get('bedrooms'),
-            'bathrooms': enrich.get('bathrooms'),
-            'year_built': enrich.get('year_built')
-        })
+        for item in items:
+            training_data.append({
+                'category': item.get('category'),
+                'amount': item.get('amount'),
+                'arv': loan.get('arv'),
+                'property_type': property_data.get('property_type'),
+                'zip_code': property_data.get('zip_code'),
+                'project_year': property_data.get('project_year', 2024),
+                'building_size': enrich.get('building_size') or property_data.get('building_size'),
+                'bedrooms': enrich.get('bedrooms') or property_data.get('bedrooms'),
+                'bathrooms': enrich.get('bathrooms') or property_data.get('bathrooms'),
+                'year_built': enrich.get('year_built') or property_data.get('year_built')
+            })
     
     df = pd.DataFrame(training_data)
     df = df.dropna(subset=['category', 'amount', 'arv'])
@@ -171,9 +232,20 @@ def retrain_models(supabase_url, supabase_key, triggered_by):
         except Exception as e:
             logger.warning(f"Could not detect existing version: {e}")
     
-    budgets, items = fetch_training_data(supabase)
-    enrichment_data, attom_calls = check_enrichment(supabase, budgets)
-    df = prepare_training_dataset(budgets, items, enrichment_data)
+    import os
+    api_url = os.getenv('TRAINING_API_URL', 'https://rbi-prod-25ffebfb684a.herokuapp.com')
+    api_key = os.getenv('TRAINING_API_KEY')
+    
+    if api_key:
+        logger.info("Using external API for training data")
+        budgets = fetch_training_data_from_api(api_url, api_key)
+        enrichment_data, attom_calls = process_enrichment_from_api(budgets)
+        df = prepare_training_dataset(budgets, enrichment_data)
+    else:
+        logger.info("Using Supabase for training data (legacy)")
+        budgets, items = fetch_training_data(supabase)
+        enrichment_data, attom_calls = check_enrichment(supabase, budgets)
+        df = prepare_training_dataset(budgets, enrichment_data)
     df, le_prop, le_zip = encode_training_features(df)
     new_models, new_performance, categories_trained = train_category_models(df)
     
