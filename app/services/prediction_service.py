@@ -14,24 +14,25 @@ from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, m
 import pickle
 
 def normalize_property_type(prop_type):
-    """Normalize property type variations to standard format"""
+    """Normalize property type variations to standard format that LabelEncoder expects"""
     if not prop_type:
-        return 'SFR'
+        return 'Single Family'
     
     property_type_mapping = {
-        'Single Family': 'SFR',
-        'SingleFamily': 'SFR',
-        'Single-Family': 'SFR',
-        'single family': 'SFR',
-        'Single Family Residence': 'SFR',
-        'Multi Family': 'Multifamily',
+        'SFR': 'Single Family',
+        'SingleFamily': 'Single Family',
+        'Single-Family': 'Single Family',
+        'single family': 'Single Family',
+        'Single Family Residence': 'Single Family',
         'MultiFamily': 'Multifamily',
         'Multi-Family': 'Multifamily',
+        'Multi Family': 'Multifamily',
         'multi family': 'Multifamily',
-        'Town House': 'Townhouse',
         'TownHouse': 'Townhouse',
+        'Town House': 'Townhouse',
         'town house': 'Townhouse',
-        'Condominium': 'Condo'
+        'Condominium': 'Condo',
+        'Condo': 'Condo'
     }
     
     return property_type_mapping.get(prop_type, prop_type)
@@ -45,7 +46,7 @@ def encode_features(features, required_features):
             prop_type = normalize_property_type(features.get('property_type', 'SFR'))
             encoded_features['Property Type_encoded'] = config.LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
         except Exception as e:
-            logger.warning(f"Failed to encode property_type '{features.get('property_type')}': {e}. Using default.")
+            logger.warning(f"Failed to encode property_type '{features.get('property_type')}' (normalized to '{prop_type}'): {e}. Using default.")
             encoded_features['Property Type_encoded'] = 0
     
     if 'Property Zip_encoded' in required_features:
@@ -85,8 +86,8 @@ TRAINING_LOCK = threading.Lock()
 
 def get_general_model():
     """Get or create GENERAL fallback model"""
-    if 'GENERAL' in MODELS:
-        return MODELS['GENERAL']
+    if 'GENERAL' in config.MODELS:
+        return config.MODELS['GENERAL']
     
     logger.info("Creating GENERAL model on-demand...")
     try:
