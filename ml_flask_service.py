@@ -66,9 +66,10 @@ CURRENT_MODEL_VERSION = None
 # ============================================================================
 
 # Input schema for prediction features
-features_model = api.model('Features', {
+features_model = api.model('PredictionFeatures', {
     'arv': fields.Float(required=True, description='After Repair Value ($)', example=450000),
-    'property_type': fields.String(required=True, description='Property type. Accepts: SFR, "Single Family", Condo, Townhouse, "Town House", Multifamily, "Multi Family"', example='Single Family'),
+    'property_type': fields.String(required=False, description='Property type', example='SFR', 
+                                   enum=['SFR', 'Condo', 'Townhouse', 'Multifamily', 'Land', 'Warehouse', 'Office']),
     'zip_code': fields.String(required=True, description='5-digit zip code', example='33178'),
     'project_year': fields.Integer(required=False, description='Project year', example=2024),
     'building_size': fields.Integer(required=False, description='Building size in sqft', example=2049),
@@ -92,9 +93,7 @@ predict_output = api.model('PredictOutput', {
     'model_r2': fields.Float(description='R² score (0-1)', example=0.5242),
     'model_mape': fields.Float(description='Mean Absolute Percentage Error (%)', example=76.24),
     'model_rmse': fields.Float(description='Root Mean Square Error ($)', example=5621.03),
-    'model_version': fields.String(description='Model version', example='v1'),
-    'warning': fields.String(required=False, description='Warning message if using fallback model'),
-    'is_fallback': fields.Boolean(required=False, description='True if using generic fallback instead of trained model')
+    'model_version': fields.String(description='Model version', example='v1')
 })
 
 # Error response schema
@@ -133,7 +132,7 @@ retrain_output = api.model('RetrainOutput', {
 # ============================================================================
 
 def load_models_from_storage():
-    """Load models from Supabase Storage - always loads latest version"""
+    """Load models from Supabase Storage"""
     global MODELS, LABEL_ENCODERS, MODEL_PERFORMANCE, CURRENT_MODEL_VERSION
     
     try:
@@ -146,40 +145,20 @@ def load_models_from_storage():
         
         supabase: Client = create_client(supabase_url, supabase_key)
         
-        # Find latest version by checking what exists in storage
-        logger.info("Finding latest model version...")
-        latest_version = None
+        version = 'v1'
+        CURRENT_MODEL_VERSION = version
         
-        try:
-            # List folders in models/
-            folders = supabase.storage.from_('ml-models').list('models')
-            versions = [f['name'] for f in folders if f['name'].startswith('v')]
-            
-            if versions:
-                # Sort versions (v1, v2, v3, etc.)
-                versions.sort(key=lambda x: int(x[1:]))
-                latest_version = versions[-1]
-                logger.info(f"Found versions: {versions}, using latest: {latest_version}")
-            else:
-                latest_version = 'v1'
-                logger.info("No versions found, defaulting to v1")
-        except:
-            latest_version = 'v1'
-            logger.warning("Could not list versions, defaulting to v1")
+        logger.info(f"Loading models version {version}...")
         
-        CURRENT_MODEL_VERSION = latest_version
-        
-        logger.info(f"Loading models version {latest_version}...")
-        
-        models_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/budget_models_enhanced.pkl')
-        encoders_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/label_encoders_enhanced.pkl')
-        perf_file = supabase.storage.from_('ml-models').download(f'models/{latest_version}/model_performance_enhanced.json')
+        models_file = supabase.storage.from_('ml-models').download(f'models/{version}/budget_models_enhanced.pkl')
+        encoders_file = supabase.storage.from_('ml-models').download(f'models/{version}/label_encoders_enhanced.pkl')
+        perf_file = supabase.storage.from_('ml-models').download(f'models/{version}/model_performance_enhanced.json')
         
         MODELS = pickle.loads(models_file)
         LABEL_ENCODERS = pickle.loads(encoders_file)
         MODEL_PERFORMANCE = json.loads(perf_file.decode('utf-8'))
         
-        logger.info(f"✓ Loaded {len(MODELS)} category models from {latest_version}")
+        logger.info(f"✓ Loaded {len(MODELS)} category models")
         return True
         
     except Exception as e:
@@ -197,27 +176,6 @@ def get_model_tier(performance):
         return 'B'
     else:
         return 'C'
-
-def normalize_property_type(prop_type):
-    """Normalize property type variations to standard format"""
-    if not prop_type:
-        return 'SFR'
-    
-    property_type_mapping = {
-        'Single Family': 'SFR',
-        'SingleFamily': 'SFR',
-        'Single-Family': 'SFR',
-        'single family': 'SFR',
-        'Multi Family': 'Multifamily',
-        'MultiFamily': 'Multifamily',
-        'Multi-Family': 'Multifamily',
-        'multi family': 'Multifamily',
-        'Town House': 'Townhouse',
-        'TownHouse': 'Townhouse',
-        'town house': 'Townhouse'
-    }
-    
-    return property_type_mapping.get(prop_type, prop_type)
 
 # ============================================================================
 # API ENDPOINTS
@@ -271,34 +229,11 @@ class Predict(Resource):
             if not category:
                 return {'error': 'Category is required'}, 400
             
-            # Si no encuentra la categoría, usar modelo de fallback genérico
-            use_fallback = False
             if category not in MODELS:
-                logger.warning(f"Category '{category}' not found. Using generic fallback model.")
-                use_fallback = True
-                
-                # TODO v2: Aquí llamar a train_category_model(category) para aprender on-the-fly
-                # Por ahora, usar estimación genérica basada en ARV
-                
-                # Modelo de fallback: 3-5% del ARV como estimación genérica
-                arv = features.get('arv', 0)
-                if arv <= 0:
-                    arv = 250000  # ARV promedio por defecto
-                
-                # Estimación conservadora: 4% del ARV
-                fallback_prediction = arv * 0.04
-                
                 return {
-                    'predicted_amount': round(fallback_prediction, 2),
-                    'model_used': 'Generic Fallback (4% ARV)',
-                    'model_tier': 'C',
-                    'model_r2': 0.0,
-                    'model_mape': 100.0,
-                    'model_rmse': fallback_prediction * 0.5,  # 50% uncertainty
-                    'model_version': 'fallback',
-                    'warning': f'No trained model for category "{category}". Using generic estimate.',
-                    'is_fallback': True
-                }
+                    'error': f'No model available for category: {category}',
+                    'available_categories': sorted(list(MODELS.keys()))[:20]
+                }, 404
             
             # Get model info
             model_info = MODELS[category]
@@ -310,10 +245,9 @@ class Predict(Resource):
             
             if 'Property Type_encoded' in required_features:
                 try:
-                    prop_type = normalize_property_type(features.get('property_type', 'SFR'))
+                    prop_type = features.get('property_type', 'SFR')
                     encoded_features['Property Type_encoded'] = LABEL_ENCODERS['Property Type'].transform([prop_type])[0]
-                except Exception as e:
-                    logger.warning(f"Failed to encode property_type '{features.get('property_type')}': {e}. Using default.")
+                except:
                     encoded_features['Property Type_encoded'] = 0
             
             if 'Property Zip_encoded' in required_features:
@@ -399,9 +333,9 @@ class Retrain(Resource):
             start_time = datetime.now()
             data = request.json
             
-            supabase_url = os.environ.get('SUPABASE_URL')
-            supabase_key = os.environ.get('SUPABASE_SERVICE_ROLE_KEY')
-            triggered_by = data.get('triggered_by', 'manual')
+            supabase_url = data.get('supabase_url')
+            supabase_key = data.get('supabase_key')
+            triggered_by = data.get('triggered_by')
             
             if not supabase_url or not supabase_key:
                 return {'error': 'Supabase credentials required'}, 400
